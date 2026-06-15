@@ -37,7 +37,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,28 +65,30 @@ import retrofit2.http.GET
 import retrofit2.http.Query
 import java.net.URLEncoder
 
-// --- 1. НАСТРОЙКИ СЕРВЕРА JACKETT (ОБЯЗАТЕЛЬНО ИЗМЕНИТЕ ПОД СЕБЯ) ---
-// Укажите IP вашего компьютера в локальной сети. Например: "http://192.168.1.55:9117/"
+// --- 1. НАСТРОЙКИ СЕРВЕРА JACKETT ---
 const val JACKETT_URL = "http://192.168.1.100:9117/" 
-const val JACKETT_KEY = "ВАШ_API_КЛЮЧ"
+const val JACKETT_KEY = "YOUR_API_KEY" // Вставьте сюда ваш ключ английскими буквами/цифрами
 
 // --- 2. СЕТЕВЫЕ МОДЕЛИ RETROFIT ---
 interface JackettApi {
     @GET("api/v2.0/indexers/all/results")
     suspend fun searchTorrents(
         @Query("apikey") apiKey: String = JACKETT_KEY,
-        @Query("Query") query: String
+        @Query("Query") searchQuery: String
     ): JackettResponse
 }
 
-data class JackettResponse(val Results: List<JackettResult>)
-data class JackettResult(val Title: String, val Size: Long, val Seeders: Int, val MagnetUri: String?, val Tracker: String)
+data class JackettResponse(val Results: List<JackettResult>?)
+data class JackettResult(val Title: String?, val Size: Long?, val Seeders: Int?, val MagnetUri: String?, val Tracker: String?)
 
-val retrofit = Retrofit.Builder()
-    .baseUrl(JACKETT_URL)
-    .addConverterFactory(GsonConverterFactory.create())
-    .build()
-val jackettApi = retrofit.create(JackettApi::class.java)
+// Безопасная инициализация Retrofit
+object NetworkManager {
+    private val retrofit = Retrofit.Builder()
+        .baseUrl(JACKETT_URL)
+        .addConverterFactory(GsonConverterFactory.create())
+        .build()
+    val api: JackettApi = retrofit.create(JackettApi::class.java)
+}
 
 // --- 3. UI МОДЕЛИ ---
 data class MovieUI(val title: String, val description: String, val posterUrl: String, val rating: Int, val tracker: String, val magnetUrl: String?)
@@ -134,14 +135,12 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
     
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current // Для скрытия клавиатуры после поиска
+    val focusManager = LocalFocusManager.current
 
-    // Стартовые фильмы по умолчанию (чтобы экран не был пустым при запуске)
     val defaultMovies = remember {
         listOf(
-            MovieUI("Матрица", "Культовый научно-фантастический фильм.", "https://dummyimage.com/600x900/222/fc0&text=Матрица", 9, "Rutor", null),
-            MovieUI("Интерстеллар", "Путешествие сквозь пространство и время.", "https://dummyimage.com/600x900/222/fc0&text=Интерстеллар", 8, "Kinozal", null),
-            MovieUI("Дюна", "Эпическая история о планете Арракис.", "https://dummyimage.com/600x900/222/fc0&text=Дюна", 7, "NNM", null)
+            MovieUI("Матрица", "Нажмите на поиск выше", "https://dummyimage.com/600x900/222/fc0&text=Matrix", 9, "Rutor", null),
+            MovieUI("Интерстеллар", "Чтобы найти фильмы", "https://dummyimage.com/600x900/222/fc0&text=Space", 8, "Kinozal", null)
         )
     }
 
@@ -152,39 +151,43 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
         OutlinedTextField(
             value = query, 
             onValueChange = { query = it }, 
-            placeholder = { Text("Введите название и нажмите Поиск...") }, 
+            placeholder = { Text("Поиск фильмов...") }, 
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            // Настройка клавиатуры: показываем кнопку поиска (лупу) вместо "Enter"
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            // Обработка нажатия на кнопку поиска
             keyboardActions = KeyboardActions(
                 onSearch = {
-                    focusManager.clearFocus() // Скрываем клавиатуру
+                    focusManager.clearFocus()
                     if (query.isNotBlank()) {
                         isLoading = true
                         coroutineScope.launch {
                             try {
-                                val response = jackettApi.searchTorrents(query = query)
-                                // Превращаем сырые данные Jackett в красивые карточки
-                                searchResults = response.Results
-                                    .sortedByDescending { it.Seeders } // Сортируем по количеству сидов
+                                val response = NetworkManager.api.searchTorrents(searchQuery = query)
+                                val results = response.Results ?: emptyList()
+                                
+                                searchResults = results
+                                    .filter { it.Title != null }
+                                    .sortedByDescending { it.Seeders ?: 0 }
                                     .map { jackettItem ->
-                                        // Генерируем красивую заглушку-постер с названием трекера
-                                        val encodedText = URLEncoder.encode(jackettItem.Tracker, "UTF-8")
-                                        val sizeGb = String.format("%.1f GB", jackettItem.Size / (1024.0 * 1024.0 * 1024.0))
+                                        val trackerName = jackettItem.Tracker ?: "Unknown"
+                                        val encodedText = try {
+                                            URLEncoder.encode(trackerName, "UTF-8")
+                                        } catch (e: Exception) { "Tracker" }
+                                        
+                                        val sizeBytes = jackettItem.Size ?: 0L
+                                        val sizeGb = String.format("%.1f GB", sizeBytes / (1024.0 * 1024.0 * 1024.0))
                                         
                                         MovieUI(
-                                            title = jackettItem.Title,
-                                            description = "Размер: $sizeGb | Трекер: ${jackettItem.Tracker}",
+                                            title = jackettItem.Title ?: "Без названия",
+                                            description = "Размер: $sizeGb | Трекер: $trackerName",
                                             posterUrl = "https://dummyimage.com/600x900/1e1e1e/FFCC00&text=$encodedText",
-                                            rating = jackettItem.Seeders,
-                                            tracker = jackettItem.Tracker,
+                                            rating = jackettItem.Seeders ?: 0,
+                                            tracker = trackerName,
                                             magnetUrl = jackettItem.MagnetUri
                                         )
                                     }
                             } catch (e: Exception) {
-                                Toast.makeText(context, "Ошибка поиска: Проверьте IP и API ключ", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "Ошибка сети", Toast.LENGTH_SHORT).show()
                             } finally {
                                 isLoading = false
                             }
@@ -195,15 +198,12 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         
-        // Индикатор загрузки сети
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
         } else {
-            // Если мы ничего не искали — показываем дефолтные, иначе результаты поиска
             val displayList = if (searchResults.isEmpty() && query.isBlank()) defaultMovies else searchResults
-            
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 160.dp), 
                 horizontalArrangement = Arrangement.spacedBy(12.dp), 
@@ -214,7 +214,6 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
                         Column {
                             Box {
                                 AsyncImage(model = movie.posterUrl, contentDescription = movie.title, contentScale = ContentScale.Crop, modifier = Modifier.height(230.dp).fillMaxWidth())
-                                // Плашка с количеством сидов вместо рейтинга
                                 Box(modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xE6FFCC00)).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                     Text("Сиды: ${movie.rating}", color = Color.Black, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                                 }
@@ -258,7 +257,6 @@ fun MovieMetaDetails(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -
         Spacer(modifier = Modifier.height(24.dp))
         
         Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { 
-            // Передаем название для экрана загрузки (в реальном приложении тут будет magnetUrl)
             onStartPlay(movie.title) 
         }, colors = CardDefaults.cardColors(containerColor = Color(0xFF222222))) {
             Row(modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -272,16 +270,15 @@ fun MovieMetaDetails(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -
     }
 }
 
-// --- 7. ЭКРАН ИМИТАЦИИ БУФЕРИЗАЦИИ И ПЛЕЕР ---
+// --- 7. ЭКРАН ПЛЕЕРА ---
 @Composable
 fun BufferingScreen(torrentName: String, onReady: (String) -> Unit) {
-    var progress by remember { mutableFloatStateOf(0f) }
+    var progress by remember { mutableStateOf(0f) }
     LaunchedEffect(Unit) {
         while (progress < 1f) {
             delay(150)
             progress += 0.05f
         }
-        // После буферизации запускаем легальное тестовое видео в плеере
         onReady("https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4")
     }
     Column(modifier = Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
