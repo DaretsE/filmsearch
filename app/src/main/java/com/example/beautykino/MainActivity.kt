@@ -1,6 +1,7 @@
 package com.example.beautykino
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -21,6 +22,8 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,7 +48,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -53,16 +59,38 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Query
+import java.net.URLEncoder
 
-// --- Данные ---
-val demoMovies = listOf(
-    MovieUI("Синтел", "История о девушке по имени Синтел...", "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Sintel_poster_v2.jpg/640px-Sintel_poster_v2.jpg", 7.8, "2010", "Фэнтези"),
-    MovieUI("Большой заяц Бак", "История о гигантском кролике...", "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Big_buck_bunny_poster_big.jpg/640px-Big_buck_bunny_poster_big.jpg", 8.1, "2008", "Мультфильм"),
-    MovieUI("Слезы стали", "Постапокалиптический фильм...", "https://upload.wikimedia.org/wikipedia/commons/thumb/1/18/Tears_of_Steel_poster.jpg/640px-Tears_of_Steel_poster.jpg", 6.9, "2012", "Фантастика")
-)
+// --- 1. НАСТРОЙКИ СЕРВЕРА JACKETT (ОБЯЗАТЕЛЬНО ИЗМЕНИТЕ ПОД СЕБЯ) ---
+// Укажите IP вашего компьютера в локальной сети. Например: "http://192.168.1.55:9117/"
+const val JACKETT_URL = "http://192.168.1.100:9117/" 
+const val JACKETT_KEY = "ВАШ_API_КЛЮЧ"
 
-data class MovieUI(val title: String, val description: String, val posterUrl: String, val rating: Double, val year: String, val genre: String)
-data class TorrentStream(val name: String, val size: String, val seeders: Int, val url: String)
+// --- 2. СЕТЕВЫЕ МОДЕЛИ RETROFIT ---
+interface JackettApi {
+    @GET("api/v2.0/indexers/all/results")
+    suspend fun searchTorrents(
+        @Query("apikey") apiKey: String = JACKETT_KEY,
+        @Query("Query") query: String
+    ): JackettResponse
+}
+
+data class JackettResponse(val Results: List<JackettResult>)
+data class JackettResult(val Title: String, val Size: Long, val Seeders: Int, val MagnetUri: String?, val Tracker: String)
+
+val retrofit = Retrofit.Builder()
+    .baseUrl(JACKETT_URL)
+    .addConverterFactory(GsonConverterFactory.create())
+    .build()
+val jackettApi = retrofit.create(JackettApi::class.java)
+
+// --- 3. UI МОДЕЛИ ---
+data class MovieUI(val title: String, val description: String, val posterUrl: String, val rating: Int, val tracker: String, val magnetUrl: String?)
 
 sealed class Screen {
     object MainCatalog : Screen()
@@ -71,7 +99,7 @@ sealed class Screen {
     data class Player(val videoUrl: String) : Screen()
 }
 
-// --- Главный класс ---
+// --- 4. ГЛАВНЫЙ КЛАСС ПРИЛОЖЕНИЯ ---
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,7 +111,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// --- Навигация ---
 @Composable
 fun AppNavigator() {
     var currentScreen by remember { mutableStateOf<Screen>(Screen.MainCatalog) }
@@ -98,37 +125,103 @@ fun AppNavigator() {
     }
 }
 
-// --- Экраны ---
+// --- 5. ЭКРАН КАТАЛОГА И ПОИСКА ---
 @Composable
 fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
     var query by remember { mutableStateOf("") }
-    val filteredMovies = demoMovies.filter { it.title.contains(query, ignoreCase = true) }
+    var isLoading by remember { mutableStateOf(false) }
+    var searchResults by remember { mutableStateOf<List<MovieUI>>(emptyList()) }
     
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val focusManager = LocalFocusManager.current // Для скрытия клавиатуры после поиска
+
+    // Стартовые фильмы по умолчанию (чтобы экран не был пустым при запуске)
+    val defaultMovies = remember {
+        listOf(
+            MovieUI("Матрица", "Культовый научно-фантастический фильм.", "https://dummyimage.com/600x900/222/fc0&text=Матрица", 9, "Rutor", null),
+            MovieUI("Интерстеллар", "Путешествие сквозь пространство и время.", "https://dummyimage.com/600x900/222/fc0&text=Интерстеллар", 8, "Kinozal", null),
+            MovieUI("Дюна", "Эпическая история о планете Арракис.", "https://dummyimage.com/600x900/222/fc0&text=Дюна", 7, "NNM", null)
+        )
+    }
+
     Column(modifier = Modifier.padding(16.dp)) {
         Text("BeautyKino", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
         Spacer(modifier = Modifier.height(12.dp))
+        
         OutlinedTextField(
             value = query, 
             onValueChange = { query = it }, 
-            placeholder = { Text("Поиск...") }, 
-            modifier = Modifier.fillMaxWidth()
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 160.dp), 
-            horizontalArrangement = Arrangement.spacedBy(12.dp), 
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            items(filteredMovies) { movie ->
-                Card(modifier = Modifier.clickable { onMovieSelect(movie) }, elevation = CardDefaults.cardElevation(4.dp)) {
-                    Column {
-                        Box {
-                            AsyncImage(model = movie.posterUrl, contentDescription = movie.title, contentScale = ContentScale.Crop, modifier = Modifier.height(230.dp).fillMaxWidth())
-                            Box(modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xE6FFCC00)).padding(horizontal = 6.dp, vertical = 2.dp)) {
-                                Text(movie.rating.toString(), color = Color.Black, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+            placeholder = { Text("Введите название и нажмите Поиск...") }, 
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            // Настройка клавиатуры: показываем кнопку поиска (лупу) вместо "Enter"
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            // Обработка нажатия на кнопку поиска
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    focusManager.clearFocus() // Скрываем клавиатуру
+                    if (query.isNotBlank()) {
+                        isLoading = true
+                        coroutineScope.launch {
+                            try {
+                                val response = jackettApi.searchTorrents(query = query)
+                                // Превращаем сырые данные Jackett в красивые карточки
+                                searchResults = response.Results
+                                    .sortedByDescending { it.Seeders } // Сортируем по количеству сидов
+                                    .map { jackettItem ->
+                                        // Генерируем красивую заглушку-постер с названием трекера
+                                        val encodedText = URLEncoder.encode(jackettItem.Tracker, "UTF-8")
+                                        val sizeGb = String.format("%.1f GB", jackettItem.Size / (1024.0 * 1024.0 * 1024.0))
+                                        
+                                        MovieUI(
+                                            title = jackettItem.Title,
+                                            description = "Размер: $sizeGb | Трекер: ${jackettItem.Tracker}",
+                                            posterUrl = "https://dummyimage.com/600x900/1e1e1e/FFCC00&text=$encodedText",
+                                            rating = jackettItem.Seeders,
+                                            tracker = jackettItem.Tracker,
+                                            magnetUrl = jackettItem.MagnetUri
+                                        )
+                                    }
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Ошибка поиска: Проверьте IP и API ключ", Toast.LENGTH_LONG).show()
+                            } finally {
+                                isLoading = false
                             }
                         }
-                        Text(movie.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    }
+                }
+            )
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Индикатор загрузки сети
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            }
+        } else {
+            // Если мы ничего не искали — показываем дефолтные, иначе результаты поиска
+            val displayList = if (searchResults.isEmpty() && query.isBlank()) defaultMovies else searchResults
+            
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 160.dp), 
+                horizontalArrangement = Arrangement.spacedBy(12.dp), 
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(displayList) { movie ->
+                    Card(modifier = Modifier.clickable { onMovieSelect(movie) }, elevation = CardDefaults.cardElevation(4.dp)) {
+                        Column {
+                            Box {
+                                AsyncImage(model = movie.posterUrl, contentDescription = movie.title, contentScale = ContentScale.Crop, modifier = Modifier.height(230.dp).fillMaxWidth())
+                                // Плашка с количеством сидов вместо рейтинга
+                                Box(modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xE6FFCC00)).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                                    Text("Сиды: ${movie.rating}", color = Color.Black, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            Text(movie.title, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text(movie.description, maxLines = 1, modifier = Modifier.padding(horizontal = 8.dp, bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                        }
                     }
                 }
             }
@@ -136,6 +229,7 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
     }
 }
 
+// --- 6. ЭКРАН ОПИСАНИЯ ---
 @Composable
 fun DetailsScreen(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -> Unit) {
     BoxWithConstraints(modifier = Modifier.padding(16.dp)) {
@@ -155,9 +249,6 @@ fun DetailsScreen(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -> U
 
 @Composable
 fun MovieMetaDetails(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -> Unit) {
-    val mockStreams = listOf(
-        TorrentStream("BDRip 1080p | Дублированный", "4.3 GB", 142, "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4")
-    )
     Column {
         Button(onClick = onBack) { Text("← Назад") }
         Spacer(modifier = Modifier.height(16.dp))
@@ -165,19 +256,23 @@ fun MovieMetaDetails(movie: MovieUI, onBack: () -> Unit, onStartPlay: (String) -
         Spacer(modifier = Modifier.height(12.dp))
         Text(movie.description, style = MaterialTheme.typography.bodyLarge, color = Color.LightGray)
         Spacer(modifier = Modifier.height(24.dp))
-        mockStreams.forEach { stream ->
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onStartPlay(stream.name) }, colors = CardDefaults.cardColors(containerColor = Color(0xFF222222))) {
-                Row(modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text(stream.name, fontWeight = FontWeight.Bold, color = Color.White)
-                    }
-                    Text("Смотреть ▶", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+        
+        Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { 
+            // Передаем название для экрана загрузки (в реальном приложении тут будет magnetUrl)
+            onStartPlay(movie.title) 
+        }, colors = CardDefaults.cardColors(containerColor = Color(0xFF222222))) {
+            Row(modifier = Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("Запустить онлайн просмотр", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text("Через локальный торрент-стрим", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
+                Text("▶ PLAY", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             }
         }
     }
 }
 
+// --- 7. ЭКРАН ИМИТАЦИИ БУФЕРИЗАЦИИ И ПЛЕЕР ---
 @Composable
 fun BufferingScreen(torrentName: String, onReady: (String) -> Unit) {
     var progress by remember { mutableFloatStateOf(0f) }
@@ -186,12 +281,14 @@ fun BufferingScreen(torrentName: String, onReady: (String) -> Unit) {
             delay(150)
             progress += 0.05f
         }
+        // После буферизации запускаем легальное тестовое видео в плеере
         onReady("https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4")
     }
     Column(modifier = Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         CircularProgressIndicator(progress = progress, color = MaterialTheme.colorScheme.primary, modifier = Modifier.size(80.dp))
         Spacer(modifier = Modifier.height(24.dp))
-        Text("Буферизация...", style = MaterialTheme.typography.titleMedium)
+        Text("Подключение к пирам...", style = MaterialTheme.typography.titleMedium)
+        Text(torrentName, style = MaterialTheme.typography.bodySmall, color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
