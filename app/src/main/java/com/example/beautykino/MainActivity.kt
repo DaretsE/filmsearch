@@ -67,7 +67,7 @@ import java.net.URLEncoder
 
 // --- 1. НАСТРОЙКИ СЕРВЕРА JACKETT ---
 const val JACKETT_URL = "http://192.168.1.100:9117/" 
-const val JACKETT_KEY = "YOUR_API_KEY" // Вставьте сюда ваш ключ английскими буквами/цифрами
+const val JACKETT_KEY = "YOUR_API_KEY" // Вставьте сюда ваш ключ от Jackett
 
 // --- 2. СЕТЕВЫЕ МОДЕЛИ RETROFIT ---
 interface JackettApi {
@@ -219,7 +219,8 @@ fun CatalogScreen(onMovieSelect: (MovieUI) -> Unit) {
                                 }
                             }
                             Text(movie.title, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text(movie.description, maxLines = 1, modifier = Modifier.padding(horizontal = 8.dp, bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                            // ИСПРАВЛЕННАЯ СТРОКА: padding разделен на horizontal и bottom
+                            Text(movie.description, maxLines = 1, modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                         }
                     }
                 }
